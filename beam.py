@@ -12,8 +12,8 @@ import threading
 from pathlib import Path
 from typing import List
 
-# ── GUI ────────────────────────────────────────────────────────────────────────
-from PySide6.QtCore import Qt, QObject, Signal, QPoint
+# GUI
+from PySide6.QtCore import Qt, QObject, Signal, QPoint, QTimer
 from PySide6.QtGui import (
     QAction, QBrush, QColor, QIcon, QImage,
     QLinearGradient, QPainter, QPixmap, QPolygon,
@@ -23,34 +23,36 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon, QVBoxLayout, QWidget,
 )
 
-# ── QR code ────────────────────────────────────────────────────────────────────
+# QR code
 import qrcode
 
-# ── Web server ─────────────────────────────────────────────────────────────────
+# Web server
 import uvicorn
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 
-# ── Desktop notifications ──────────────────────────────────────────────────────
+# Desktop notifications
 try:
     from plyer import notification as _plyer
     _HAS_NOTIFY = True
 except Exception:
     _HAS_NOTIFY = False
 
-# ──────────────────────────────────────────────────────────────────────────────
 PORT = 8000
 APP  = "Beam"
-# ──────────────────────────────────────────────────────────────────────────────
 
 
-# ═══ Helpers ══════════════════════════════════════════════════════════════════
+# --- Helpers
+
+def set_status(msg):
+    global server_status
+    server_status = msg
 
 def local_ip() -> str:
     """Detect the machine's LAN IP. Returns 127.0.0.1 if detection fails."""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8", 80))   # no data sent; used only for routing
+            s.connect(("8.8.8.8", 80))   # routes the socket without sending data
             return s.getsockname()[0]
     except OSError:
         return "127.0.0.1"
@@ -132,21 +134,21 @@ def make_app_icon() -> QIcon:
     return QIcon(QPixmap.fromImage(img))
 
 
-# ═══ Server → Qt bridge ═══════════════════════════════════════════════════════
+# --- Server → Qt bridge
 
 class Bridge(QObject):
-    """Carries signals from the background HTTP thread into the Qt main thread."""
-    files_received = Signal(list)   # list[str] of saved filenames
+    """Carries signals from the HTTP thread into the Qt main thread."""
+    files_received = Signal(list)   # list[str] filenames
 
 
 _bridge = Bridge()
 
 
-# ═══ FastAPI application ══════════════════════════════════════════════════════
+# --- FastAPI
 
 _api = FastAPI()
 
-# All emojis use HTML entities to avoid Python unicode-escape interpretation.
+# Emojis use HTML entities to avoid Python unicode-escape errors.
 _UPLOAD_PAGE = """\
 <!DOCTYPE html>
 <html lang="en">
@@ -344,6 +346,7 @@ async def index() -> str:
 
 @_api.post("/upload")
 async def upload(files: List[UploadFile] = File(...)) -> JSONResponse:
+    set_status("Receiving Upload...")
     try:
         dest = beam_dir()
     except OSError as e:
@@ -380,11 +383,13 @@ async def upload(files: List[UploadFile] = File(...)) -> JSONResponse:
     except Exception as e:
         return JSONResponse({"success": False, "error": f"Unexpected error: {e}"}, status_code=500)
 
+    set_status(f"Received {len(saved)} files")
     _bridge.files_received.emit(saved)
+    set_status("Waiting for Uploads")
     return JSONResponse({"success": True})
 
 
-# ═══ HTTP server (daemon thread) ══════════════════════════════════════════════
+# --- HTTP server
 
 class BeamServer:
     def __init__(self, port: int = PORT) -> None:
@@ -392,6 +397,7 @@ class BeamServer:
         self._server: uvicorn.Server | None = None
 
     def start(self) -> None:
+        set_status("Server Starting...")
         cfg = uvicorn.Config(
             app=_api,
             host="0.0.0.0",
@@ -399,6 +405,7 @@ class BeamServer:
             log_level="warning",
             access_log=False,
         )
+        set_status(f"Running at http://{local_ip()}:{self._port}")
         self._server = uvicorn.Server(cfg)
         threading.Thread(
             target=self._server.run,
@@ -411,7 +418,7 @@ class BeamServer:
             self._server.should_exit = True
 
 
-# ═══ Main window ══════════════════════════════════════════════════════════════
+# --- Main window
 
 _CSS = """
 QMainWindow, #root { background: #09090b; }
@@ -432,11 +439,16 @@ QLabel              { color: #e4e4e7; }
 
 class BeamWindow(QMainWindow):
     def __init__(self, url: str, server: BeamServer, lan_ok: bool = True) -> None:
+
+        self._timer = QTimer()
+        self._timer.timeout.connect(self._refresh_status)
+        self._timer.start(500)
+
         super().__init__()
         self._server = server
         self.url = url
         self._lan_ok = lan_ok
-        self._tray: QSystemTrayIcon | None = None   # set by _build_tray
+        self._tray: QSystemTrayIcon | None = None
 
         self.setWindowTitle(APP)
         self.setFixedWidth(400)
@@ -448,8 +460,7 @@ class BeamWindow(QMainWindow):
         self._build_tray(icon)
         _bridge.files_received.connect(self._on_files)
 
-    # ── layout ────────────────────────────────────────────────────────────────
-
+    # layout
     def _build_ui(self) -> None:
         root = QWidget()
         root.setObjectName("root")
@@ -495,7 +506,11 @@ class BeamWindow(QMainWindow):
         self._status = lbl("Waiting for uploads...", "status")
         lay.addWidget(self._status)
 
-    # ── system tray ───────────────────────────────────────────────────────────
+    # refresh
+    def _refresh_status(self):
+        self._status.setText(server_status)
+
+    # system tray
 
     def _build_tray(self, icon: QIcon) -> None:
         try:
@@ -517,9 +532,9 @@ class BeamWindow(QMainWindow):
             tray.show()
             self._tray = tray
         except Exception:
-            pass   # tray unavailable; app still works without it
+            pass  # tray unavailable; app still works
 
-    # ── slots ─────────────────────────────────────────────────────────────────
+    # slots
 
     def _tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.DoubleClick:
@@ -540,7 +555,7 @@ class BeamWindow(QMainWindow):
         self._status.setText(msg)
         desktop_notify(msg)
 
-    # ── close → minimize to tray (NOT exit) ───────────────────────────────────
+    # close 
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self._server.stop()
@@ -548,13 +563,12 @@ class BeamWindow(QMainWindow):
         event.accept()
 
 
-# ═══ Entry point ══════════════════════════════════════════════════════════════
+# --- Entry point
 
 def main() -> None:
-    # QApplication must exist before any dialog can be shown.
     app = QApplication(sys.argv)
     app.setApplicationName(APP)
-    app.setQuitOnLastWindowClosed(False)   # keep alive when window is hidden
+    app.setQuitOnLastWindowClosed(False)  # stay alive when window is hidden
 
     if not port_available(PORT):
         QMessageBox.critical(
@@ -571,7 +585,6 @@ def main() -> None:
 
     server = BeamServer()
     server.start()
-
     win = BeamWindow(url, server, lan_ok=lan_ok)
     win.show()
 
