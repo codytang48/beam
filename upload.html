@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>Beam</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: #09090b; color: #fafafa;
+  min-height: 100dvh;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  padding: 24px 16px; gap: 12px;
+}
+.logo {
+  font-size: 2rem; font-weight: 800; letter-spacing: -.02em;
+  background: linear-gradient(135deg, #60a5fa, #a78bfa);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+.sub { color: #71717a; font-size: .9rem; text-align: center; }
+.drop {
+  width: 100%; max-width: 420px;
+  border: 2px dashed #3f3f46; border-radius: 20px;
+  padding: 44px 24px; text-align: center;
+  cursor: pointer; transition: .2s; background: #18181b;
+}
+.drop.over, .drop:hover { border-color: #3b82f6; background: #1e2a3a; }
+.drop-icon { font-size: 2.4rem; margin-bottom: 10px; }
+.drop p { color: #71717a; font-size: .9rem; line-height: 1.6; }
+.drop em { color: #60a5fa; font-style: normal; font-weight: 600; }
+#fi { display: none; }
+.list { width: 100%; max-width: 420px; display: flex; flex-direction: column; gap: 6px; }
+.row {
+  background: #18181b; border: 1px solid #27272a; border-radius: 10px;
+  padding: 9px 13px; display: flex; align-items: center; gap: 8px; font-size: .85rem;
+}
+.row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #e4e4e7; }
+.row .size { color: #52525b; font-size: .75rem; flex-shrink: 0; }
+.btn {
+  width: 100%; max-width: 420px; padding: 15px;
+  border: none; border-radius: 14px;
+  background: linear-gradient(135deg, #3b82f6, #6366f1);
+  color: #fff; font-size: 1rem; font-weight: 700;
+  cursor: pointer; display: none; letter-spacing: .01em; transition: opacity .15s;
+}
+.btn:hover { opacity: .88; }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+.prog-wrap {
+  width: 100%; max-width: 420px; height: 4px;
+  background: #27272a; border-radius: 99px; display: none; overflow: hidden;
+}
+.prog-bar {
+  height: 100%; border-radius: 99px;
+  background: linear-gradient(90deg, #3b82f6, #6366f1);
+  width: 0%; transition: width .2s;
+}
+.toast {
+  width: 100%; max-width: 420px; padding: 12px 16px;
+  border-radius: 12px; font-size: .88rem; text-align: center; display: none;
+}
+.ok  { background: #052e16; color: #4ade80; border: 1px solid #166534; }
+.err { background: #2d0a0a; color: #f87171; border: 1px solid #991b1b; }
+</style>
+</head>
+<body>
+
+<div class="logo">&#9889; Beam</div>
+<p class="sub">Wirelessly send files to your computer</p>
+
+<div class="drop" id="dz">
+  <div class="drop-icon">&#128228;</div>
+  <p><em>Tap to choose files</em><br>or drop them here</p>
+  <input id="fi" type="file" multiple>
+</div>
+
+<div class="list" id="lst"></div>
+<div class="prog-wrap" id="pw"><div class="prog-bar" id="pb"></div></div>
+<button class="btn" id="btn">Send Files</button>
+<div class="toast" id="toast"></div>
+
+<script>
+const dz    = document.getElementById('dz');
+const fi    = document.getElementById('fi');
+const lst   = document.getElementById('lst');
+const btn   = document.getElementById('btn');
+const pw    = document.getElementById('pw');
+const pb    = document.getElementById('pb');
+const toast = document.getElementById('toast');
+
+let selected = [];
+
+function fmt(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / 1048576).toFixed(1) + ' MB';
+}
+
+function render() {
+  lst.innerHTML = selected.map(f =>
+    '<div class="row">' +
+    '<span>&#128196;</span>' +
+    '<span class="name">' + f.name + '</span>' +
+    '<span class="size">' + fmt(f.size) + '</span>' +
+    '</div>'
+  ).join('');
+  btn.style.display = selected.length ? 'block' : 'none';
+}
+
+dz.addEventListener('click', () => fi.click());
+fi.addEventListener('change', e => { selected = Array.from(e.target.files); render(); });
+
+['dragover', 'dragenter'].forEach(ev =>
+  dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.add('over'); }));
+['dragleave', 'dragend'].forEach(ev =>
+  dz.addEventListener(ev, () => dz.classList.remove('over')));
+dz.addEventListener('drop', e => {
+  e.preventDefault();
+  dz.classList.remove('over');
+  selected = Array.from(e.dataTransfer.files);
+  render();
+});
+
+btn.addEventListener('click', async () => {
+  if (!selected.length) return;
+  const fd = new FormData();
+  selected.forEach(f => fd.append('files', f));
+
+  btn.disabled = true;
+  pw.style.display = 'block';
+  pb.style.width = '0%';
+  toast.style.display = 'none';
+
+  try {
+    await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.upload.addEventListener('progress', e => {
+        if (e.lengthComputable) pb.style.width = (e.loaded / e.total * 100) + '%';
+      });
+      xhr.addEventListener('load',  () => xhr.status === 200 ? resolve() : reject());
+      xhr.addEventListener('error', reject);
+      xhr.open('POST', '/upload');
+      xhr.send(fd);
+    });
+
+    pb.style.width = '100%';
+    const n = selected.length;
+    showToast('ok', 'Sent ' + n + ' file' + (n > 1 ? 's' : '') + ' successfully!');
+    selected = []; lst.innerHTML = ''; btn.style.display = 'none'; fi.value = '';
+
+  } catch (_) {
+    showToast('err', 'Upload failed. Please try again.');
+  } finally {
+    btn.disabled = false;
+    setTimeout(() => { pw.style.display = 'none'; }, 1500);
+  }
+});
+
+function showToast(cls, msg) {
+  toast.className = 'toast ' + cls;
+  toast.textContent = msg;
+  toast.style.display = 'block';
+}
+</script>
+</body>
+</html>
